@@ -1,42 +1,30 @@
 import { Link, Stack } from 'expo-router';
 import { StyleSheet, Text, View } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Heart } from 'lucide-react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import SwirlingBackground from '@/components/SwirlingBackground';
 
 export default function NotFoundScreen() {
   return (
-    <View style={styles.fullScreenContainer}>
+    <SwirlingBackground>
       <Stack.Screen options={{ title: 'Oops!' }} />
-      <LinearGradient
-        colors={['#1e3a8a', '#3b82f6', '#60a5fa', '#93c5fd']}
-        style={styles.fullScreenGradient}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}>
-        <SafeAreaView style={styles.safeArea} edges={[]}>
-          <View style={styles.container}>
-            <Heart size={64} color="rgba(255, 255, 255, 0.8)" />
-            <Text style={styles.title}>Lost Your Way?</Text>
-            <Text style={styles.text}>This screen doesn't exist, but your journey does!</Text>
-            <Link href="/" style={styles.link}>
-              <View style={styles.linkContainer}>
-                <Text style={styles.linkText}>Return to Your Affirmations</Text>
-              </View>
-            </Link>
-          </View>
-        </SafeAreaView>
-      </LinearGradient>
-    </View>
+      <SafeAreaView style={styles.safeArea} edges={[]}>
+        <View style={styles.container}>
+          <Heart size={64} color="rgba(255, 255, 255, 0.8)" />
+          <Text style={styles.title}>Lost Your Way?</Text>
+          <Text style={styles.text}>This screen doesn't exist, but your journey does!</Text>
+          <Link href="/" style={styles.link}>
+            <View style={styles.linkContainer}>
+              <Text style={styles.linkText}>Return to Your Affirmations</Text>
+            </View>
+          </Link>
+        </View>
+      </SafeAreaView>
+    </SwirlingBackground>
   );
 }
 
 const styles = StyleSheet.create({
-  fullScreenContainer: {
-    flex: 1,
-  },
-  fullScreenGradient: {
-    flex: 1,
-  },
   safeArea: {
     flex: 1,
   },

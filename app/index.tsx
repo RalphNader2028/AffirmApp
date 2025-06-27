@@ -1,8 +1,7 @@
-import { View, Text, StyleSheet, Dimensions, TouchableOpacity, PanResponder, Share as RNShare } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
+import { View, Text, StyleSheet, Dimensions, TouchableOpacity, PanResponder, Share as RNShare, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { Share, Settings } from 'lucide-react-native';
+import { Share, User } from 'lucide-react-native';
 import Animated, { 
   useSharedValue, 
   useAnimatedStyle, 
@@ -18,6 +17,10 @@ import { affirmationsService } from '@/services/affirmationsService';
 import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { Platform } from 'react-native';
+import SwirlingBackground from '@/components/SwirlingBackground';
+import AffirmationCard from '@/components/AffirmationCard';
+import { captureRef } from 'react-native-view-shot';
+import * as Sharing from 'expo-sharing';
 
 const { width, height } = Dimensions.get('window');
 const CARD_WIDTH = width - 40;
@@ -33,7 +36,10 @@ export default function TodayScreen() {
   const [cardHistory, setCardHistory] = useState<string[]>([]);
   const [showStreakAnimation, setShowStreakAnimation] = useState(false);
   const [hasCompletedToday, setHasCompletedToday] = useState(false);
+  const [isReloading, setIsReloading] = useState(false);
+  const [isSharing, setIsSharing] = useState(false);
   const cardRef = useRef<View>(null);
+  const shareCardRef = useRef<View>(null);
 
   const translateX = useSharedValue(0);
   const translateY = useSharedValue(0);
@@ -70,14 +76,24 @@ export default function TodayScreen() {
   };
 
   const loadAffirmations = async () => {
+    if (isReloading) return; // Prevent multiple simultaneous loads
+    
     setIsLoading(true);
-    const allAffirmations = await affirmationsService.getAffirmationsByCategory('all');
-    // Shuffle and get 10 affirmations for swiping
-    const shuffled = allAffirmations.sort(() => 0.5 - Math.random()).slice(0, 10);
-    setAffirmations(shuffled);
-    setCurrentIndex(0);
-    setCardHistory([]);
-    setIsLoading(false);
+    setIsReloading(true);
+    
+    try {
+      const allAffirmations = await affirmationsService.getAffirmationsByCategory('all');
+      // Shuffle and get 10 affirmations for swiping
+      const shuffled = allAffirmations.sort(() => 0.5 - Math.random()).slice(0, 10);
+      setAffirmations(shuffled);
+      setCurrentIndex(0);
+      setCardHistory([]);
+    } catch (error) {
+      console.error('Error loading affirmations:', error);
+    } finally {
+      setIsLoading(false);
+      setIsReloading(false);
+    }
   };
 
   const triggerStreakAnimation = async () => {
@@ -143,28 +159,56 @@ export default function TodayScreen() {
       } else {
         console.log('Already completed today, just reloading cards');
       }
-      // Reload new affirmations after a delay
+      
+      // Reload new affirmations after a delay, but don't reset history
       setTimeout(() => {
-        loadAffirmations();
+        loadNewAffirmationsSet();
       }, hasCompletedToday ? 500 : 2500);
+    }
+  };
+
+  const loadNewAffirmationsSet = async () => {
+    if (isReloading) return;
+    
+    setIsReloading(true);
+    
+    try {
+      const allAffirmations = await affirmationsService.getAffirmationsByCategory('all');
+      // Shuffle and get 10 new affirmations
+      const shuffled = allAffirmations.sort(() => 0.5 - Math.random()).slice(0, 10);
+      
+      // Add the new set to existing affirmations instead of replacing
+      setAffirmations(prev => [...prev, ...shuffled]);
+      
+      // Move to the first card of the new set
+      const newIndex = currentIndex + 1;
+      setCurrentIndex(newIndex);
+      
+      console.log('Loaded new affirmation set, moved to index:', newIndex);
+    } catch (error) {
+      console.error('Error loading new affirmations set:', error);
+    } finally {
+      setIsReloading(false);
     }
   };
 
   const previousCard = () => {
     if (cardHistory.length > 0) {
-      // Move current card back to the end of affirmations array
-      const updatedAffirmations = [...affirmations];
-      updatedAffirmations.splice(currentIndex + 1, 0, affirmations[currentIndex]);
-      
       // Get the last card from history
       const previousCardText = cardHistory[cardHistory.length - 1];
       const newHistory = cardHistory.slice(0, -1);
       
-      // Update the current card to be the previous one
+      // Move current card forward in the affirmations array
+      const updatedAffirmations = [...affirmations];
+      updatedAffirmations.splice(currentIndex, 0, affirmations[currentIndex]);
+      
+      // Update the current position to show the previous card
       updatedAffirmations[currentIndex] = previousCardText;
       
       setAffirmations(updatedAffirmations);
       setCardHistory(newHistory);
+      
+      console.log('Moved to previous card, history length:', newHistory.length);
     }
   };
 
@@ -325,30 +369,79 @@ export default function TodayScreen() {
   });
 
   const shareAffirmation = async () => {
+    if (isSharing) return;
+    
+    setIsSharing(true);
+    
     try {
       const currentAffirmation = affirmations[currentIndex];
       
       if (Platform.OS === 'web') {
-        // For web, use the Web Share API if available, otherwise fallback to copying text
-        if (navigator.share) {
-          await navigator.share({
-            title: 'Daily Affirmation',
-            text: currentAffirmation,
-          });
-        } else {
-          // Fallback for web browsers without share API
-          await navigator.clipboard.writeText(currentAffirmation);
-          console.log('Affirmation copied to clipboard');
-        }
+        // For web, create a canvas-based image
+        await shareAffirmationWeb(currentAffirmation);
       } else {
-        // For iOS/Android, use React Native's Share module
+        // For mobile, use view-shot to capture the card
+        await shareAffirmationMobile(currentAffirmation);
+      }
+    } catch (error) {
+      console.error('Error sharing:', error);
+      Alert.alert('Error', 'Failed to share affirmation. Please try again.');
+    } finally {
+      setIsSharing(false);
+    }
+  };
+
+  const shareAffirmationMobile = async (affirmation: string) => {
+    try {
+      if (!shareCardRef.current) {
+        console.error('Share card ref not available');
+        return;
+      }
+
+      // Capture the hidden card as an image
+      const uri = await captureRef(shareCardRef.current, {
+        format: 'png',
+        quality: 1,
+        result: 'tmpfile',
+      });
+
+      console.log('Captured image URI:', uri);
+
+      // Share the image
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(uri, {
+          mimeType: 'image/png',
+          dialogTitle: 'Share Affirmation',
+        });
+      } else {
+        // Fallback to text sharing
         await RNShare.share({
-          message: currentAffirmation,
+          message: `"${affirmation}" - Lock In`,
           title: 'Daily Affirmation',
         });
       }
     } catch (error) {
-      console.error('Error sharing:', error);
+      console.error('Error sharing on mobile:', error);
+      throw error;
+    }
+  };
+
+  const shareAffirmationWeb = async (affirmation: string) => {
+    try {
+      // For web, use the Web Share API if available, otherwise fallback to copying text
+      if (navigator.share) {
+        await navigator.share({
+          title: 'Daily Affirmation - Lock In',
+          text: `"${affirmation}" - Lock In`,
+        });
+      } else {
+        // Fallback for web browsers without share API
+        await navigator.clipboard.writeText(`"${affirmation}" - Lock In`);
+        Alert.alert('Copied!', 'Affirmation copied to clipboard');
+      }
+    } catch (error) {
+      console.error('Error sharing on web:', error);
+      throw error;
     }
   };
 
@@ -371,105 +464,89 @@ export default function TodayScreen() {
 
   if (isLoading || affirmations.length === 0) {
     return (
-      <View style={styles.fullScreenContainer}>
-        <LinearGradient
-          colors={['#1e3a8a', '#3b82f6', '#60a5fa', '#93c5fd']}
-          style={styles.fullScreenGradient}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}>
-          <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
-            <View style={styles.loadingContainer}>
-              <Text style={styles.loadingText}>Loading your inspiration...</Text>
-            </View>
-          </SafeAreaView>
-        </LinearGradient>
-      </View>
+      <SwirlingBackground>
+        <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
+          <View style={styles.loadingContainer}>
+            <Text style={styles.loadingText}>Loading your inspiration...</Text>
+          </View>
+        </SafeAreaView>
+      </SwirlingBackground>
     );
   }
 
   return (
-    <View style={styles.fullScreenContainer}>
-      <LinearGradient
-        colors={['#1e3a8a', '#3b82f6', '#60a5fa', '#93c5fd']}
-        style={styles.fullScreenGradient}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}>
-        <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
-          
-          {/* Card Stack Container */}
-          <View style={styles.cardStackContainer}>
-            {/* Main Card */}
-            <Animated.View
-              ref={cardRef}
-              style={[styles.cardContainer, cardAnimatedStyle]}
-              {...panResponder.panHandlers}>
+    <SwirlingBackground>
+      <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
+        
+        {/* Card Stack Container */}
+        <View style={styles.cardStackContainer}>
+          {/* Main Card */}
+          <Animated.View
+            ref={cardRef}
+            style={[styles.cardContainer, cardAnimatedStyle]}
+            {...panResponder.panHandlers}>
 
-              <View style={styles.glassCard}>
-                <LinearGradient
-                  colors={['rgba(255, 255, 255, 0.25)', 'rgba(255, 255, 255, 0.1)']}
-                  style={styles.glassGradient}>
-                  
-                  <View style={styles.affirmationContainer}>
-                    <Text style={styles.affirmationText}>
-                      {affirmations[currentIndex]}
-                    </Text>
-                  </View>
-
-                  <View style={styles.cardFooter}>
-                    <Text style={styles.cardCounter}>
-                      {currentIndex + 1} of {affirmations.length}
-                    </Text>
-                  </View>
-                </LinearGradient>
+            <View style={styles.glassCard}>
+              <View style={styles.glassGradient}>
+                
+                <View style={styles.affirmationContainer}>
+                  <Text style={styles.affirmationText}>
+                    {affirmations[currentIndex]}
+                  </Text>
+                </View>
               </View>
-            </Animated.View>
-          </View>
+            </View>
+          </Animated.View>
+        </View>
 
-          {/* Streak Animation Overlay */}
-          {showStreakAnimation && (
-            <Animated.View style={[styles.streakOverlay, streakAnimatedStyle]}>
-              <View style={styles.streakContainer}>
-                <Text style={styles.streakEmoji}>🔥</Text>
-                <Text style={styles.streakText}>STREAK +1</Text>
-                <Text style={styles.streakSubtext}>Daily goal completed!</Text>
-              </View>
-            </Animated.View>
-          )}
+        {/* Hidden card for sharing - positioned off-screen */}
+        <View style={styles.hiddenCardContainer}>
+          <AffirmationCard
+            ref={shareCardRef}
+            affirmation={affirmations[currentIndex] || ''}
+            isForExport={true}
+          />
+        </View>
 
-          {/* Share Button - Positioned at bottom left */}
-          <TouchableOpacity 
-            onPress={shareAffirmation} 
-            style={styles.shareButton}
-            activeOpacity={0.7}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Share size={24} color="rgba(255, 255, 255, 0.9)" />
-          </TouchableOpacity>
+        {/* Streak Animation Overlay */}
+        {showStreakAnimation && (
+          <Animated.View style={[styles.streakOverlay, streakAnimatedStyle]}>
+            <View style={styles.streakContainer}>
+              <Text style={styles.streakEmoji}>🔥</Text>
+              <Text style={styles.streakText}>STREAK +1</Text>
+              <Text style={styles.streakSubtext}>Daily goal completed!</Text>
+            </View>
+          </Animated.View>
+        )}
 
-          {/* Settings Button - Positioned at bottom right */}
-          <TouchableOpacity 
-            onPress={openSettings} 
-            style={styles.settingsButton}
-            activeOpacity={0.7}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            disabled={isNavigating}>
-            <Settings 
-              size={24} 
-              color={isNavigating ? "rgba(255, 255, 255, 0.5)" : "rgba(255, 255, 255, 0.9)"} 
-            />
-          </TouchableOpacity>
-        </SafeAreaView>
-      </LinearGradient>
-    </View>
+        {/* Share Button - Positioned at bottom left */}
+        <TouchableOpacity 
+          onPress={shareAffirmation} 
+          style={[styles.shareButton, isSharing && styles.buttonDisabled]}
+          activeOpacity={0.7}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          disabled={isSharing}>
+          <Share size={24} color={isSharing ? "rgba(255, 255, 255, 0.5)" : "rgba(255, 255, 255, 0.9)"} />
+        </TouchableOpacity>
+
+        {/* Settings Button - Positioned at bottom right - Changed to User icon */}
+        <TouchableOpacity 
+          onPress={openSettings} 
+          style={styles.settingsButton}
+          activeOpacity={0.7}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          disabled={isNavigating}>
+          <User 
+            size={24} 
+            color={isNavigating ? "rgba(255, 255, 255, 0.5)" : "rgba(255, 255, 255, 0.9)"} 
+          />
+        </TouchableOpacity>
+      </SafeAreaView>
+    </SwirlingBackground>
   );
 }
 
 const styles = StyleSheet.create({
-  fullScreenContainer: {
-    flex: 1,
-  },
-  fullScreenGradient: {
-    flex: 1,
-  },
   safeArea: {
     flex: 1,
   },
@@ -508,11 +585,11 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 30,
     elevation: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.15)',
   },
   glassGradient: {
     flex: 1,
     padding: 24,
-    backdropFilter: 'blur(20px)',
   },
   affirmationContainer: {
     flex: 1,
@@ -526,15 +603,12 @@ const styles = StyleSheet.create({
     lineHeight: 36,
     textAlign: 'center',
   },
-  cardFooter: {
-    alignItems: 'center',
-    marginTop: 20,
-  },
-  cardCounter: {
-    fontSize: 14,
-    fontFamily: 'Inter-Medium',
-    color: 'rgba(255, 255, 255, 0.7)',
-    marginBottom: 8,
+  hiddenCardContainer: {
+    position: 'absolute',
+    top: -1000, // Position off-screen
+    left: -1000,
+    opacity: 0,
+    pointerEvents: 'none',
   },
   streakOverlay: {
     position: 'absolute',
@@ -604,6 +678,9 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
     elevation: 8,
     zIndex: 1000,
+  },
+  buttonDisabled: {
+    opacity: 0.6,
   },
   settingsButton: {
     position: 'absolute',
